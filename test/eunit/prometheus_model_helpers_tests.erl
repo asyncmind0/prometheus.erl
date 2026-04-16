@@ -562,14 +562,6 @@ histogram_metric_test() ->
         prometheus_model_helpers:histogram_metric(LabelsMap, Buckets, Count, Sum)
     ).
 
-fitler_undefined_metrics_test() ->
-    ?assertEqual(
-        [1, 2, 3],
-        prometheus_model_helpers:filter_undefined_metrics(
-            [undefined, 1, undefined, 2, 3, undefined, undefined]
-        )
-    ).
-
 eunsure_mf_type_test() ->
     ?assertEqual('GAUGE', prometheus_model_helpers:ensure_mf_type(gauge)),
     ?assertEqual('COUNTER', prometheus_model_helpers:ensure_mf_type(counter)),
@@ -585,7 +577,8 @@ ensure_binary_or_string_test() ->
     ?assertEqual(<<"qwe">>, prometheus_model_helpers:ensure_binary_or_string(qwe)),
     ?assertEqual("qwe", prometheus_model_helpers:ensure_binary_or_string("qwe")),
     ?assertEqual(<<"qwe">>, prometheus_model_helpers:ensure_binary_or_string(<<"qwe">>)),
-    ?assertEqual(["2"], prometheus_model_helpers:ensure_binary_or_string(2)).
+    ?assertEqual(<<"2">>, prometheus_model_helpers:ensure_binary_or_string(2)),
+    ?assertEqual(<<"1.5">>, prometheus_model_helpers:ensure_binary_or_string(1.5)).
 
 create_mf_test() ->
     ?assertMatch(
@@ -651,7 +644,43 @@ create_mf_test() ->
             ]
         },
         create_mf(<<"create_mf_with_map">>, "help", gauge, #{#{<<"l1">> => <<"v1">>} => my_value})
+    ),
+
+    %% Fast path: list of #'Metric'() is used as-is (no metrics_from_tuples)
+    PrebuiltMetric = #'Metric'{
+        label = [#'LabelPair'{name = <<"k">>, value = <<"v">>}],
+        gauge = #'Gauge'{value = 42}
+    },
+    ?assertMatch(
+        #'MetricFamily'{
+            name = <<"fast_path">>,
+            help = <<"help">>,
+            type = 'GAUGE',
+            metric = [PrebuiltMetric]
+        },
+        prometheus_model_helpers:create_mf(<<"fast_path">>, <<"help">>, gauge, [PrebuiltMetric])
     ).
+
+%% Test that prometheus_metric:metrics/2 normalizes old-format ETS entries
+%% (2-tuple {Labels, Help}) into the new 3-tuple {Labels, HelpBin, NameBin}.
+%% This covers the backward-compat clause in normalize_mf_row/1, reachable
+%% during hot upgrades from nodes that predate the pre-computed binary change.
+normalize_mf_row_backward_compat_test() ->
+    Table = ?PROMETHEUS_GAUGE_TABLE,
+    Registry = test_compat_registry,
+    Name = test_compat_metric,
+    Labels = [label_a],
+    Help = "Old format help",
+    OldTuple = {{Registry, mf, Name}, {Labels, Help}, [], undefined, undefined},
+    ets:insert(Table, OldTuple),
+    try
+        [[Name, {Labels, HelpBin, NameBin}, [], undefined, undefined]] =
+            prometheus_metric:metrics(Table, Registry),
+        ?assertEqual(<<"Old format help">>, HelpBin),
+        ?assertEqual(<<"test_compat_metric">>, NameBin)
+    after
+        ets:delete(Table, {Registry, mf, Name})
+    end.
 
 collect_metrics(g1, _Data) ->
     prometheus_model_helpers:gauge_metric(g1_value).
